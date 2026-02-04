@@ -10,9 +10,10 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 
+import img2pdf
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image
+from pypdf import PdfReader, PdfWriter
 from tqdm import tqdm
 
 from utils.decode import decode_pages
@@ -198,15 +199,31 @@ class FlipHTML5Downloader:
             if not filename:
                 tasks.append((idx, None, None))
                 continue
-            url = f"{base_url}files/{size}/{filename}"
+            url = self._build_page_url(base_url, filename, size)
             out_name = f"{idx+1:03d}_{filename}"
             tasks.append((idx, url, out_name))
         return tasks
 
+    def _build_page_url(self, base_url: str, filename: str, size: str) -> str:
+        """Build a valid page URL from a filename or relative path."""
+        if filename.startswith("http://") or filename.startswith("https://"):
+            return filename
+        path = filename
+        if path.startswith("./"):
+            path = path[2:]
+        if path.startswith("/"):
+            path = path[1:]
+        if path.startswith("files/"):
+            return urljoin(base_url, path)
+        return urljoin(base_url, f"files/{size}/{path}")
+
     def _download_one(self, session: requests.Session, url: str, out_path: str) -> str:
         if not self.overwrite and os.path.exists(out_path):
             return "skip"
-        resp = session.get(url, stream=True, timeout=30)
+        try:
+            resp = session.get(url, stream=True, timeout=30)
+        except requests.RequestException as exc:
+            return f"fail:{exc.__class__.__name__}"
         if resp.status_code != 200:
             return f"fail:{resp.status_code}"
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -266,28 +283,28 @@ class FlipHTML5Downloader:
     def _build_pdf(
         self, image_paths, pdf_path: str, title: str | None, description: str | None
     ) -> None:
-        images = []
-        for path in tqdm(image_paths, desc="pdf", unit="page", leave=False):
-            img = Image.open(path)
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            images.append(img)
-
-        if not images:
+        if not image_paths:
             raise ValueError("No images to build PDF")
 
-        first, rest = images[0], images[1:]
-        pdf_kwargs = {}
-        if title:
-            pdf_kwargs["title"] = title
-        if description:
-            pdf_kwargs["subject"] = description
-
         os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
-        first.save(pdf_path, "PDF", save_all=True, append_images=rest, **pdf_kwargs)
+        with open(pdf_path, "wb") as out_file:
+            paths = list(tqdm(image_paths, desc="pdf", unit="page", leave=False))
+            out_file.write(img2pdf.convert(*paths))
 
-        for img in images:
-            img.close()
+        if title or description:
+            reader = PdfReader(pdf_path)
+            writer = PdfWriter()
+            for page in reader.pages:
+                writer.add_page(page)
+            metadata = {}
+            if title:
+                metadata["/Title"] = title
+            if description:
+                metadata["/Subject"] = description
+            if metadata:
+                writer.add_metadata(metadata)
+            with open(pdf_path, "wb") as out_file:
+                writer.write(out_file)
 
     def _print_book_info(
         self, title: str | None, description: str | None, pages: int

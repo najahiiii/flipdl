@@ -50,7 +50,7 @@ python main.py https://fliphtml5.com/<pub>/<book>/Title \
 
 - If the book uses encrypted `fliphtml5_pages`, the tool will download and cache `deString.js`
   and run a small Node.js runner to decode the page list.
-- Cached files are stored in `~/.cache/flipdl`.
+- Cached files are stored in `./.cache`.
 
 ## License
 
