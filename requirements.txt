@@ -3,3 +3,4 @@ requests>=2.31.0
 tqdm>=4.67.3
 img2pdf>=0.5.1
 pypdf>=4.0.0
+wasmtime>=41.0.0
