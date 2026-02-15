@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
 import re
 import sys
 
-import requests
+import aiohttp
 
 try:
     from wasmtime import Linker, Module, Store, WasmtimeError
@@ -28,7 +29,12 @@ WASM_PAGE_SIZE = 65536
 _RUNTIME_CACHE: dict[str, "_DeStringRuntime"] = {}
 
 
-def decode_pages(pages_raw, session: requests.Session) -> list | None:
+def _decode_with_runtime(js_path: str, value: str) -> str:
+    runtime = get_runtime(js_path)
+    return runtime.decode(value)
+
+
+async def decode_pages(pages_raw, session: aiohttp.ClientSession) -> list | None:
     """Return page list from raw config value, decoding if needed."""
     if isinstance(pages_raw, list):
         return pages_raw
@@ -36,7 +42,7 @@ def decode_pages(pages_raw, session: requests.Session) -> list | None:
         text = pages_raw.strip()
         if text.startswith("[") or text.startswith("{"):
             return parse_pages_json(text)
-        decoded = destring(text, session)
+        decoded = await destring(text, session)
         if not decoded:
             return None
         return parse_pages_json(decoded)
@@ -60,17 +66,18 @@ def parse_pages_json(text: str) -> list | None:
     return data if isinstance(data, list) else None
 
 
-def ensure_destring_js(session: requests.Session) -> str:
+async def ensure_destring_js(session: aiohttp.ClientSession) -> str:
     """Download and cache deString.js for decoding."""
     cache_dir = os.path.join(os.getcwd(), ".cache")
     os.makedirs(cache_dir, exist_ok=True)
     js_path = os.path.join(cache_dir, "deString.js")
     if os.path.exists(js_path) and os.path.getsize(js_path) > 0:
         return js_path
-    resp = session.get(DESTRING_URL, timeout=30)
-    resp.raise_for_status()
+    async with session.get(DESTRING_URL) as resp:
+        resp.raise_for_status()
+        content = await resp.read()
     with open(js_path, "wb") as f:
-        f.write(resp.content)
+        f.write(content)
     return js_path
 
 
@@ -95,6 +102,8 @@ def get_runtime(js_path: str) -> "_DeStringRuntime":
         )
     wasm_bytes = extract_wasm_from_js(js_path)
     runtime = _DeStringRuntime(wasm_bytes)
+    if not runtime.is_ready():
+        raise RuntimeError("failed to initialize deString runtime")
     _RUNTIME_CACHE[js_path] = runtime
     return runtime
 
@@ -103,53 +112,58 @@ class _DeStringRuntime:
     """Minimal WASM runtime wrapper for FlipHTML5 DeString."""
 
     def __init__(self, wasm_bytes: bytes) -> None:
-        self._store = Store()
-        self._module = Module(self._store.engine, wasm_bytes)
-        self._linker = Linker(self._store.engine)
-        self._define_imports()
-        self._instance = self._linker.instantiate(self._store, self._module)
+        store = Store()
+        module = Module(store.engine, wasm_bytes)
+        linker = Linker(store.engine)
+        self._define_imports(linker, module)
+        instance = linker.instantiate(store, module)
+        exports = instance.exports(store)
 
-        exports = self._instance.exports(self._store)
+        self._store = store
         self._memory = exports["memory"]
         self._malloc = exports["malloc"]
         self._free = exports["free"]
         self._destring = exports["DeString"]
 
-        exports["emscripten_stack_init"](self._store)
-        exports["__wasm_call_ctors"](self._store)
+        exports["emscripten_stack_init"](store)
+        exports["__wasm_call_ctors"](store)
 
-    def _import_type(self, module: str, name: str):
-        for imp in self._module.imports:
-            if imp.module == module and imp.name == name:
+    def is_ready(self) -> bool:
+        """Return True when required exports are resolved."""
+        return all((self._memory, self._malloc, self._free, self._destring))
+
+    def _import_type(self, wasm_module, import_module: str, name: str):
+        for imp in wasm_module.imports:
+            if imp.module == import_module and imp.name == name:
                 return imp.type
-        raise RuntimeError(f"missing wasm import: {module}.{name}")
+        raise RuntimeError(f"missing wasm import: {import_module}.{name}")
 
-    def _define_imports(self) -> None:
-        self._linker.define_func(
+    def _define_imports(self, linker, wasm_module) -> None:
+        linker.define_func(
             "env",
             "emscripten_run_script",
-            self._import_type("env", "emscripten_run_script"),
+            self._import_type(wasm_module, "env", "emscripten_run_script"),
             self._emscripten_run_script,
             access_caller=True,
         )
-        self._linker.define_func(
+        linker.define_func(
             "env",
             "emscripten_memcpy_big",
-            self._import_type("env", "emscripten_memcpy_big"),
+            self._import_type(wasm_module, "env", "emscripten_memcpy_big"),
             self._emscripten_memcpy_big,
             access_caller=True,
         )
-        self._linker.define_func(
+        linker.define_func(
             "wasi_snapshot_preview1",
             "fd_write",
-            self._import_type("wasi_snapshot_preview1", "fd_write"),
+            self._import_type(wasm_module, "wasi_snapshot_preview1", "fd_write"),
             self._fd_write,
             access_caller=True,
         )
-        self._linker.define_func(
+        linker.define_func(
             "env",
             "emscripten_resize_heap",
-            self._import_type("env", "emscripten_resize_heap"),
+            self._import_type(wasm_module, "env", "emscripten_resize_heap"),
             self._emscripten_resize_heap,
             access_caller=True,
         )
@@ -226,12 +240,18 @@ class _DeStringRuntime:
         return raw.decode("utf-8", errors="replace")
 
 
-def destring(value: str, session: requests.Session) -> str | None:
+async def destring(value: str, session: aiohttp.ClientSession) -> str | None:
     """Decode encrypted text using FlipHTML5 deString WASM from Python."""
     try:
-        js_path = ensure_destring_js(session)
-        runtime = get_runtime(js_path)
-        return runtime.decode(value)
-    except (requests.RequestException, OSError, RuntimeError, WasmtimeError) as exc:
+        js_path = await ensure_destring_js(session)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _decode_with_runtime, js_path, value)
+    except (
+        aiohttp.ClientError,
+        asyncio.TimeoutError,
+        OSError,
+        RuntimeError,
+        WasmtimeError,
+    ) as exc:
         print(f"error: destring failed: {exc}", file=sys.stderr)
         return None
