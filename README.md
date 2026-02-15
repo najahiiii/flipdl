@@ -1,14 +1,14 @@
 # flipdl
 
-Download FlipHTML5 pages and build a PDF from a public FlipHTML5 share URL.
+FlipHTML5 downloader that fetches pages and builds single PDF.
 
-## Features
+## What it does
 
-- Accepts FlipHTML5 share URLs (e.g., `https://fliphtml5.com/<pub>/<book>/Title`).
-- Downloads page images and builds a single PDF.
-- Clean CLI output with progress bars.
+- Accepts a public FlipHTML5 URL.
+- Downloads all pages.
+- Merges them into one PDF.
 
-## Requirements
+## Requirement
 
 - Python 3.10+
 
@@ -22,32 +22,41 @@ pip install -r requirements.txt
 
 ## Usage
 
+Interactive mode:
+
+```bash
+python main.py
+```
+
+Enter the `FlipHTML5 URL:` prompt and the process runs automatically until PDF is created.
+
+One-shot mode:
+
 ```bash
 python main.py https://fliphtml5.com/<pub>/<book>/Title
 ```
 
-Common options:
+## CLI options
+
+- `url` FlipHTML5 URL (optional in interactive mode).
+- `--out` output folder (default: `download`).
+- `--workers` number of download workers (default: `6`).
+- `--overwrite` overwrite existing page files.
+- `--pdf` output PDF path (default: `<out>/<title>.pdf`).
+
+Example:
 
 ```bash
 python main.py https://fliphtml5.com/<pub>/<book>/Title \
-  --out download \
-  --workers 8
+  --out output \
+  --workers 8 \
+  --pdf output/book.pdf
 ```
-
-### Options
-
-- `--out` output directory (default: `download`)
-- `--workers` number of download workers
-- `--overwrite` overwrite existing page files
-- `--save-config` save parsed `config.json`
-- `--pdf` output PDF path (default: `<out>/<title>.pdf`)
-- `--keep-pages` keep downloaded page images
 
 ## Notes
 
-- If the book uses encrypted `fliphtml5_pages`, the tool will download and cache `deString.js`
-  then decode the embedded WASM directly from Python via `wasmtime`.
-- Cached files are stored in `./.cache`.
+- Temporary folder `<out>/_pages` is always cleaned on success, failure, or cancel.
+- `deString.js` is cached in `./.cache` for faster next runs.
 
 ## License
 
